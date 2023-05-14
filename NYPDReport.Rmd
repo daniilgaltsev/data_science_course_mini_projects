@@ -1,0 +1,241 @@
+---
+title: "NYPD Shooting Incident Data Report"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r imports, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+```
+
+# Data Loading
+
+The data for this project comes from the [NYPD Shooting Incident Data (Historic)](https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic) dataset. First, we are going to download the data and take a preliminary look at it.
+
+```{r data download}
+data_url = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+data = read.csv(data_url, na.strings=c("NA",""))
+```
+
+```{r raw data head}
+head(data)
+```
+
+```{r raw data summary}
+summary(data)
+```
+
+The dataset contains 27312 rows and 21 columns. Some of the location columns are showing the same information or have different levels of precision. The only column which has an unclear interpretation is STATISTICAL_MURDER_FLAG. To see what it means we can read the footnotes of the dataset on its [official page](https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8).
+
+The footnotes say that STATISTICAL_MURDER_FLAG is a boolean that indicated whether a shooting incident resulted in a murder. Additionally, the footnotes contain some additional information of interest. For example, if a shooting incident resulted in multiple victims, the dataset contains a row for each of the victims and those rows have the same INCIDENT_KEY. Also, the dataset contains shooting incidents only with victims, i.e. the ones resulting in an injury or death.
+
+For our use, we need to clean the dataset, which will include removing some columns and casting others to correct types. First of all, we are going to leave only the columns, which might use. Thus, we will remove all the columns connected with location except for the borough since this feature should be representive enough of the location without being too precise or verbose. Secondly, we need to correct the types of OCCUR_DATE and OCCUR_TIME from strings to date/time. Finally, all the other columns need to be converted to a factor.
+
+
+```{r clean raw data and summary}
+data = data %>%
+  mutate(
+    OCCUR_DATE=mdy(OCCUR_DATE),
+    OCCUR_TIME=hms(OCCUR_TIME),
+    INCIDENT_KEY=factor(INCIDENT_KEY),
+    BORO=factor(BORO),
+    STATISTICAL_MURDER_FLAG=factor(STATISTICAL_MURDER_FLAG),
+    PERP_AGE_GROUP=factor(PERP_AGE_GROUP),
+    PERP_SEX=factor(PERP_SEX),
+    PERP_RACE=factor(PERP_RACE),
+    VIC_AGE_GROUP=factor(VIC_AGE_GROUP),
+    VIC_SEX=factor(VIC_SEX),
+    VIC_RACE=factor(VIC_RACE)
+  ) %>%
+  select(
+    -c(Lon_Lat, X_COORD_CD, Y_COORD_CD, PRECINCT, JURISDICTION_CODE, LOCATION_DESC, LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC,Latitude,Longitude)
+  )
+head(data)
+summary(data)
+```
+
+After the transformation, we have a couple of problems to look into. The columns PERP_AGE_GROUP, PERP_SEX and PERP_RACE have missing or other factors. While the null should be replaced with unknown, we should take a look what are other factors since they might be erroneous.
+
+```{r age group levels}
+levels(data$PERP_AGE_GROUP)
+```
+
+Here, we can see three unusual factors for age groups: 1020, 224 and 940. Those are mostly likely to be mistakes, and I think the best course of action is to replace them with UNKNOWNs.
+
+```{r perp race levels}
+levels(data$PERP_RACE)
+```
+
+With PERP_RACE there are no problems.
+
+
+```{r cleaning levels}
+data = data %>%
+  mutate(
+    PERP_RACE=recode(PERP_RACE,"(null)"="UNKNOWN"),
+    PERP_SEX=recode(PERP_SEX,"(null)"="U"),
+    PERP_AGE_GROUP=recode(
+      PERP_AGE_GROUP,
+      "(null)"="UNKNOWN",
+      "1020"="UNKNOWN",
+      "224"="UNKNOWN",
+      "940"="UNKNOWN"
+    ),
+    VIC_AGE_GROUP=recode(VIC_AGE_GROUP, "1022"="UNKNOWN")
+  ) %>%
+  mutate(
+    PERP_RACE=replace_na(PERP_RACE, "UNKNOWN"),
+    PERP_SEX=replace_na(PERP_SEX, "U"),
+    PERP_AGE_GROUP=replace_na(PERP_AGE_GROUP, "UNKNOWN")
+  ) %>%
+  mutate(
+    PERP_SEX=factor(PERP_SEX, levels=levels(data$VIC_SEX))
+  )
+
+head(data)
+summary(data)
+```
+
+After the last pass the data looks good. There does not seem to be any problems with it and we can move on.
+
+
+First, let's take a look at amounts of total shooting incidents and those resulting in a death by sexes of a victim and a perpetrator.
+
+
+```{r count incidents by sexes}
+incidents_by_sex = data %>% count(PERP_SEX, VIC_SEX)
+```
+
+```{r count murders by sexes}
+murders_by_sex = data %>%
+  filter(STATISTICAL_MURDER_FLAG == "true") %>%
+  count(PERP_SEX, VIC_SEX)
+```
+
+```{r plot incidents by sexes}
+ggplot(incidents_by_sex, aes(x=VIC_SEX, y=PERP_SEX, fill=n, label=n)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient(low="white", high="blue") +
+  labs(x="Victim's Sex", y="Perpetrator's Sex", fill="Count")
+```
+
+For shooting incidents in general, there are clear differences based on the sexes. The largest amount of incidents occur when both the victim and the perpetrator are male, the least out of known occur when both are female.
+
+There is a significant amount of incidents where the perpetrator's sex is unknown. However, I don't think that can skew the difference for known sexes since it is too large compared to the overall number of incidents. Another interesting thing is that there are shooting incidents where the victim's sex is unknown.
+
+
+```{r plot murders by sexes}
+ggplot(murders_by_sex, aes(x=VIC_SEX, y=PERP_SEX, fill=n, label=n)) +
+  geom_tile() +
+  geom_text() +
+  scale_fill_gradient(low="white", high="blue") +
+  labs(x="Victim's Sex", y="Perpetrator's Sex", fill="Count")
+```
+
+For shooting incidents resulting in a death, we see similar discrepancies with slight differences in proportions, which might or might not be significant. There is also a victim with unknown sex, which is even more bizarre than previously, since it raises the question of how it was determined that the incident resulted in a death.
+
+In any case, now, we are going to take a deeper look at how different factors affect the distribution of incidents resulting in deaths starting with boroughs.
+
+
+```{r count and plot murders by borough}
+murders_by_boro = data %>%
+  filter(STATISTICAL_MURDER_FLAG == "true") %>%
+  count(BORO)
+
+ggplot(murders_by_boro, aes(x=BORO, y=n, label=n)) +
+  geom_bar(stat="identity", fill="blue") +
+  geom_text() +
+  scale_fill_gradient(low="white", high="blue") +
+  labs(x="Borough", y="Count")
+```
+
+The graph shows that there are clear differences between the amounts of lethal incidents in each of them. However, there is a chance that the differences can be explained by the populations and sizes of those boroughs. But if that were the case, we wouldn't expect to see a difference between proportions of non-lethal to lethal incidents in those boroughs. We are going to take a look at that later when we will be fitting the data.
+
+Now, we are going to take a look at how the time of day affects shooting incidents.
+
+```{r plot murders by time of day}
+ggplot(
+  data %>% mutate(OCCUR_TIME=as.numeric(OCCUR_TIME)), 
+  aes(x=OCCUR_TIME, fill=STATISTICAL_MURDER_FLAG)
+) + 
+  geom_histogram(bins=80) +
+  scale_fill_manual(values=c("blue", "red")) +
+  scale_x_continuous(labels=function(x) format(as.POSIXct(x, origin="2022-01-01", tz="UTC"), "%H:%M:%S")) +
+  labs(x="Time of Day", y="Count", fill="Murder")
+```
+
+As expected, the number of shooting incidents increases sharply during the night and evening hours. However, the proportion of murders during the day might be slightly higher than during other hours, which would be quite interesting. This also should be investigated.
+
+The next step is to take at historic distribution of shooting incidents to see if there are any trends. For that we are going to plot monthly shooting incidents.
+
+```{r count and plot monthly murders}
+monthly = data %>%
+  mutate(month=floor_date(OCCUR_DATE, "month")) %>%
+  count(month, STATISTICAL_MURDER_FLAG)
+
+ggplot(monthly, aes(x=month, y=n, color=STATISTICAL_MURDER_FLAG)) +
+  geom_line() +
+  labs(x="Month", y="Count", color="Murder") +
+  scale_color_manual(values=c("blue", "red"))
+```
+
+From the plot, we can see that there is a clear correlation between lethal and non-lethal shooting incidents. Additionally, winter seems to be the period where there is the least amount of incidents of both types. There is also a general trend until 2020 where the amount of non-lethal incidents decreases faster than lethal incidents, but after that, at the start of the pandemic, both rise sharply.
+
+With the data looked at, we can see that there is quite a few patterns that can be explored further in the dataset. We are going to focus on lethal incidents. For that we are going to fit a logistic regression model in order to predict if an incident results in a murder.
+
+The first model is going to predict the probability that the incident is lethal from the sex of the victim only. Here, we wouldn't expect the used feature to be statistically significant.
+
+```{r model by victim sex only and summary}
+model_sex = glm(STATISTICAL_MURDER_FLAG ~ VIC_SEX, data=data, family=binomial)
+summary(model_sex)
+```
+
+
+```{r probabilities of the first model}
+predict_data = expand.grid(VIC_SEX=levels(data$VIC_SEX))
+predict_data$prob = predict(model_sex, newdata=predict_data, type="response")
+predict_data
+```
+
+Looking at both the model summary and predicted probabilities, we see that the difference is insignificant. Now, we will fit a model with all the features about the victim, the location, the time of day, the month and the year.
+
+```{r train full model and summary}
+data = data %>%
+  mutate(
+    time_num=as.numeric(OCCUR_TIME),
+    month=month(OCCUR_DATE),
+    year=year(OCCUR_DATE)
+  )
+model = glm(STATISTICAL_MURDER_FLAG ~ VIC_SEX + BORO + time_num + VIC_RACE + VIC_AGE_GROUP + month + year, data=data, family=binomial)
+summary(model)
+```
+
+For this model we have a few significant predictors. First of all, the age group of the victim, which makes sense since we would expected different chances of a successful recovery based on the overall health of the victim and age is a good predictor for that. Another significant predictor is the year. We saw from the daily incidents plot that there might have been a difference and this reinforces that suspicion. Finally, there is a statistically significant difference based on the borough, which is a bit unusual. So, let's take a look at the predicted probabilities based on the borough and the age group of the victim.
+
+```{r plot full model predictions, message=FALSE}
+predictions = copy(data)
+predictions$prob = predict(model, newdata=predictions, type="response")
+predictions = predictions %>%
+  group_by(BORO, VIC_AGE_GROUP) %>%
+  summarize(prob=mean(prob)) %>%
+  ungroup()
+
+ggplot(predictions, aes(y=BORO, x=VIC_AGE_GROUP, fill=prob, label=prob)) +
+  geom_tile() +
+  geom_text(aes(label=round(prob,2))) +
+  scale_fill_gradient(low="white", high="blue") +
+  labs(x="Victim's Age Group", y="Borough", fill="Probability")
+```
+
+From the predicted probabilities, we can see that the probability of a lethal incidents increase with the the age for all boroughs. However, the base probability for Manhattan is a couple percent lower for all groups. This is pretty strange and I have difficulties coming up with a solid explanation for that. In any case, I believe this would need further investigation, but that goes out of scope of this basic analysis of the dataset.
+
+
+With the analysis done, I want to highlight a few biases both in the data and of my own, which might have affected the results. First of all, the data contains only the incidents which resulted in an injury. Secondly, due to economic, geographic and population difference between boroughs, the emergency services availability might be different between them, which can affect how the data is collected or reported. These factors are important to consider since they can affect the data quite dramatically. Finally, I only have a cursory knowledge of New York and shooting incidents in general. This means I might be looking only into a surface level connections, which might be missing underlying reasons, in particular the ones connected with boroughs.
