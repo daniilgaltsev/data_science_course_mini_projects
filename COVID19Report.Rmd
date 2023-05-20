@@ -1,0 +1,476 @@
+---
+title: "COVID19 Report"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+```{r imports, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(stringr)
+```
+
+
+# Data
+
+The data for this report comes from [COVID-19 Data Repository by CSSEt Johns Hopkins University](https://github.com/CSSEGISandData/COVID-19/tree/master). We are going to be using the provided time series data about global cases, deaths and recoveries.
+
+```{r data urls}
+data_root_url = str_c("https://raw.githubusercontent.com/CSSEGISandData/",
+                 "COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/")
+filenames = c(
+  "time_series_covid19_confirmed_global.csv",
+  "time_series_covid19_deaths_global.csv",
+  "time_series_covid19_recovered_global.csv"
+)
+file_urls = str_c(data_root_url, filenames)
+```
+
+```{r data loading, results="hide"}
+global_cases = read_csv(file_urls[1])
+global_deaths = read_csv(file_urls[2])
+global_recovered = read_csv(file_urls[3])
+```
+
+
+```{r global_cases head}
+head(global_cases)
+```
+
+The data has each date as a column. We are going to transform it, so that date is a column and cases are a separate column. We are also going to remove coordinate columns. Since each of the three datasets are structred similarly, we'll repeat this procedure for each of them.
+
+After that we'll combine them into one table.
+
+
+```{r pivot, select and rename}
+global_cases = global_cases %>%
+  pivot_longer(
+    cols=-c("Province/State", "Country/Region", "Lat", "Long"),
+    names_to="date",
+    values_to="cases"
+  ) %>%
+  select(-c(Lat, Long))
+global_deaths = global_deaths %>%
+  pivot_longer(
+    cols=-c("Province/State", "Country/Region", "Lat", "Long"),
+    names_to="date",
+    values_to="deaths"
+  ) %>%
+  select(-c(Lat, Long))
+
+global_recovered = global_recovered %>%
+  pivot_longer(
+    cols=-c("Province/State", "Country/Region", "Lat", "Long"),
+    names_to="date",
+    values_to="recovered"
+  ) %>%
+  select(-c(Lat, Long))
+
+head(global_cases)
+```
+
+```{r combine into one}
+global = global_cases %>%
+  full_join(global_deaths) %>%
+  full_join(global_recovered) %>%
+  rename(
+    country_region="Country/Region",
+    province_state="Province/State"
+  ) %>%
+  mutate(date=mdy(date))
+head(global)
+```
+
+```{r global summary}
+summary(global)
+```
+
+Looking at the summary of the combined table, we have a few NAs, rows with 0 cases and rows with -1 recovered.
+First, let's look which countries have NAs for cases.
+
+```{r cases na}
+cases_na = global %>% filter(is.na(cases))
+head(cases_na)
+unique(cases_na$country_region)
+```
+The only country with NAs for cases is Canada. To make sure that it's a problem with only a specific province, let's see if Canada has rows with not NA cases.
+
+```{r cases canada}
+tail(global %>% filter(!is.na(cases), country_region=="Canada"))
+```
+It seems that Canada has an invalid NA province which causes problems. So, we are going to remove them and all the rows with 0 cases.
+
+```{r filter rows without cases}
+global = global %>% filter(cases > 0) 
+summary(global)
+```
+
+Removing those rows, also removed NAs for deaths. Now, we need to look at -1 for recovered.
+
+```{r look at recovered -1}
+global %>% filter(recovered == -1)
+```
+
+The problem only affects Pitcarnd Islands. We are going to take a look at it in more detail.
+
+```{r pitcairn islands summary}
+summary(global %>% filter(province_state == "Pitcairn Islands"))
+```
+
+The only problem with it, seems to be those 8 rows. It's probably indicating missing data, and we are going to remove those rows. We also need to look at NAs.
+
+```{r recovered NAs}
+na_recovered = global %>% filter(is.na(recovered))
+head(na_recovered)
+unique(na_recovered$country_region)
+```
+Once again the problem is with Canada. In this case we'll replace those values with 0 to indicate that there are no known/tracked recoveries.
+
+```{r remove -1 recovered}
+global = global %>% 
+  replace_na(list(recovered=0)) %>%
+  filter(recovered >= 0)
+summary(global)
+```
+
+With NAs dealt with it we are going to make sure that the maximum values are correct.
+
+```{r cases large}
+global %>% filter(cases>103000000)
+```
+
+```{r deaths large}
+global %>% filter(deaths>1100000)
+```
+
+```{r recovered large}
+global %>% filter(recovered>30000000)
+```
+All the values seem to be valid, but there might be a problem with recoveries. For US there are 0 and for India they seem to stop in 2021. Let's see what the latest date with nonzero number of recoveries.
+
+```{r max tracked recovered}
+max((global %>% filter(recovered>0))$date)
+```
+
+It seems that recoveries have not been tracked since August 2021. Since it was almost 2 years ago, it means the information is way out of date and we won't be able to use it for the analysis. Thus we are going to remove this column.
+
+```{r remove recovered}
+global = global %>% select(-c("recovered"))
+tail(global)
+```
+
+Now, let's check if there is a similar problem with cases or deaths.
+
+```{r tail 0 deaths}
+unique(global %>% filter(date>"2023-01-01", deaths==0) %>% select(province_state, country_region))
+```
+
+```{r tail 0 cases}
+unique(global %>% filter(date>"2023-01-01", cases==0) %>% select(province_state, country_region))
+```
+
+There are some place with no deaths, but since they had cases and considering their locations, it seems that those are correct.
+
+Since we have finished cleaning the COVID data, we are going to add population statistics in order to be able to calculate additional statistics. The population data comes from the same repository.
+
+```{r download population}
+pop_url = str_c("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/",
+                "master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv")
+population = read_csv(pop_url) %>%
+  group_by(Country_Region, Province_State) %>%
+  summarize(Population=sum(Population)) %>%
+  rename(
+    country_region=Country_Region,
+    province_state=Province_State,
+    population=Population
+  ) %>%
+  ungroup()
+summary(population)
+```
+
+They are a few NAs for the population column we need to check out.
+
+```{r population na}
+population %>% filter(is.na(population))
+```
+Those seem to be mostly erroneous, missing or repeated additions, which we can ignore, since even if some of them have unaccounted population, the population data is not that accurate in many place anyway and it contains populations numbers from 2020.
+
+```{r remove na}
+population = population %>% filter(!is.na(population))
+summary(population)
+```
+
+With that done, we can add population numbers to the combined table.
+
+```{r add population}
+global = global %>%
+  left_join(
+    population,
+    by=c("province_state", "country_region")
+  )
+```
+
+Additionally, we'll prepare tables with aggregated statistics globally and for each country separately
+
+```{r totals by country}
+global_by_country = global %>%
+  group_by(country_region, date) %>%
+  summarize(cases=sum(cases), deaths=sum(deaths), population=sum(population)) %>%
+  ungroup()
+tail(global_by_country)
+```
+
+
+```{r totals globally}
+global_totals = global_by_country %>%
+  group_by(date) %>%
+  summarize(cases=sum(cases), deaths=sum(deaths)) %>%
+  ungroup()
+tail(global_totals)
+```
+
+# Visualizations
+
+With the data cleaned, we can move on to analyzing it. First, we'll start with visualizations.
+
+```{r viz global cases}
+global_totals %>%
+  ggplot(aes(x=date, y=cases)) +
+  geom_line() +
+  labs(title="COVID19 cases", x="Date", y="Cases")
+```
+```{r viz global deaths}
+global_totals %>%
+  ggplot(aes(x=date, y=deaths)) +
+  geom_line() +
+  labs(title="COVID19 cases", x="Date", y="Deaths")
+```
+
+From these we can see that, as expected, deaths and cases are correlated and we can see how COVID progressed through  the beginning, vaccine roll out, mitigation removal and Omicron variant until the end of extensive monitoring. From these graph, we can see that lethality trended down. To check that we can look at the number of deaths per 100 cases.
+
+```{r viz global lethality}
+global_totals %>%
+  mutate(deaths_per_100_cases=deaths/cases*100) %>%
+  ggplot(aes(x=date, y=deaths_per_100_cases)) +
+  geom_line() +
+  labs(title="COVID19 deaths per 100 cases (global)", x="Date", y="Deaths per 100 cases")
+```
+
+The visualization cofirms the hypothesis. Lethality did drop down, ending at around 1%. One thing that aggregated statistics can hide is the differences between groups. For example, we can look at the same plot, but aggregated by country to see how it can differ from the global trend.
+
+
+```{r add country proportions}
+global_by_country = global_by_country %>% 
+  mutate(
+    deaths_per_100_cases=deaths/cases*100,
+    cases_per_100_pop=cases/population*100,
+  )
+tail(global_by_country %>% select(deaths_per_100_cases, cases_per_100_pop, everything()))
+```
+
+```{r viz leathality}
+ggplot(data=global_by_country, aes(x=date, y=deaths_per_100_cases)) +
+  geom_line(data=subset(global_by_country, country_region=="US"), aes(color="US")) +
+  geom_line(data=subset(global_by_country, country_region=="South Africa"), aes(color="South Africa")) +
+  geom_line(data=subset(global_by_country, country_region=="India"), aes(color="India")) +
+  geom_line(data=subset(global_by_country, country_region=="Japan"), aes(color="Japan")) +
+  geom_abline(intercept=97000/25000000 * 100, slope=0, aes(color="Influenza (high)")) +
+  geom_abline(intercept=19000/40000000 * 100, slope=0, aes(color="Influenza (low)")) +
+  labs(title="COVID19 deaths per 100 cases", x="Date", y="Deaths per 100 Cases")
+```
+
+This plot reveals that there are substantial differences in mortality between countries. For example, South Africa has mortality as high as 2.5%, while Japan is around the value of Influenza mortality in US - between 0.4% and 0.05% (calculated as upper and lower limits from estimates from [CDC](https://www.cdc.gov/flu/about/burden/index.html). Other groupings that will differ are based on ages, but the breakdown isn't included in this data and we'll not look into it.
+
+Now, let's move onto looking at the number of new cases and deaths. Since the data is accumulated over 3 years, we are going to using a weekly granularity.
+
+
+```{r add daily and weekly changes}
+global_by_country = global_by_country %>%
+  mutate(
+    new_cases=cases-lag(cases),
+    new_deaths=deaths-lag(deaths)
+  )
+
+global_by_country_weekly = 
+  global_by_country %>% 
+  mutate(week=floor_date(date, "week")) %>%
+  group_by(country_region, week) %>%
+  summarise(
+    cases=max(cases), deaths=max(deaths),
+    new_cases=sum(new_cases), new_deaths=sum(new_deaths),
+    population=max(population)
+  ) %>%
+  mutate(
+    deaths_per_100_cases=deaths/cases*100,
+    deaths_per_100_pop=deaths/population*100,
+    cases_per_100_pop=cases/population*100
+  ) %>%
+  ungroup()
+head(global_by_country_weekly %>% filter(new_deaths>0) %>% select(new_cases, cases, new_deaths, deaths, everything()))
+```
+
+
+```{r viz weekly cases}
+ggplot(data=global_by_country_weekly, aes(x=week, y=new_cases)) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="US"), aes(color="US")) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="South Africa"), aes(color="South Africa")) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="India"), aes(color="India")) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="Japan"), aes(color="Japan")) +
+  scale_y_log10() +
+  labs(title="COVID19 weekly new cases", x="Cases", y="Date")
+```
+
+```{r viz weekly deaths}
+ggplot(data=global_by_country_weekly, aes(x=week, y=new_deaths)) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="US"), aes(color="US")) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="South Africa"), aes(color="South Africa")) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="India"), aes(color="India")) +
+  geom_line(data=subset(global_by_country_weekly, country_region=="Japan"), aes(color="Japan")) +
+  scale_y_log10() +
+  labs(title="COVID19 weekly new deaths", x="Date", y="Deaths")
+```
+
+Here, we can see that new cases and deaths are following a similar periodic trend, however, towards the end there are differences. For South Africa and India, new deaths have been dropping for a year while new cases were more stable and started rising in 2023. For the US, both new deaths and new cases have stabilized around 20000 cases and 2500 deaths both dipping slightly in March 2023. In Japan, the periodic trend continued.
+
+This again highlights how big are the differences between countries. The causes for that are not clear and can vary from under reporting due to not having enough testing capacity to maintaining a high level of COVID mitigations such as the use of respirators and air filtering.
+
+Since the dynamics also differ depending on the period selected, we are going to drop the first months of the pandemic, approximately from the start of gradual return to schools around the world, and do the modeling for that range and for the tail end of the time frame.
+
+```{r create weekly without start}
+global_by_country_weekly_wo_start = global_by_country_weekly %>%
+  filter(week > "2020-09-15")
+```
+
+# Modeling
+
+Since we mostly focused on analyzing 4 countries, we are going to stick with them. This will both allow to inspect the trends for them and also avoid misinterpreting any possible things we might have not looked at for other countries. However, this means that the models will not be suitable to use in the global context.
+
+```{r filter final countries}
+train_data = global_by_country_weekly_wo_start %>%
+  filter(country_region %in% c("India", "Japan", "South Africa", "US")) %>%
+  mutate(country_region=as.factor(country_region))
+tail(train_data)
+```
+
+First, we'll try to fit the mortality rate based on the number of cases per 100 pop.
+
+
+```{r fit base lethality model}
+model_dc = lm(deaths_per_100_cases ~ cases_per_100_pop, data=train_data)
+summary(model_dc)
+```
+
+```{r viz base lethality model}
+with_dc_prediction = copy(train_data)
+with_dc_prediction$prediction = predict(model_dc, new=train_data)
+with_dc_prediction %>%
+  ggplot(aes(x=cases_per_100_pop)) +
+  geom_point(aes(y=deaths_per_100_cases), color="blue") +
+  geom_point(aes(y=prediction), color="red") +
+  labs(title="Model Predictions", x="Cases per 100 Pop.", y="Deaths per 100 Cases")
+```
+
+
+We can see that the model without a factor for countries doesn't fit well individual countries. However, it still captures the general trend. Looking at the coefficients, cases per 100 pop has a negative coefficient. This does not mean that with a larger proportion of infected population, the lethality drops, but rather that this number might correlate with time. However, there still might be reasons for the decrease in mortality. For example, with more cases treated doctors develop better ways to provide treatment for severe cases.
+
+Now, let's try to fit a model that includes country as a predictor.
+
+```{r fit full lethality model}
+model_dcwc = lm(deaths_per_100_cases ~ cases_per_100_pop*country_region, data=train_data)
+summary(model_dcwc)
+```
+
+```{r viz full lethality model}
+with_dcwc_prediction = copy(train_data)
+with_dcwc_prediction$prediction = predict(model_dcwc, new=train_data)
+with_dcwc_prediction %>%
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=deaths_per_100_cases), color="blue") +
+  geom_point(aes(y=prediction), color="red") +
+  labs(title="Model Predictions", x="Date", y="Deaths per 100 Cases")
+```
+
+We can immediately see that this model fits the data much better. The adjusted $R^2$ improves from 0.1267 to 0.905. The next improvement can be achieved by separating the different stages of the pandemic (for example, by including the current variant).
+
+Looking at the coefficients, we can see that all non combined predictors are significant and from combinations only cases per 100 pop and US is significant. I am not sure why is that and it would be interesting to investigate what is the underlying reason for the difference in the slope for the US.
+
+
+```{r fit base death percent model, include=FALSE}
+model_ndc = lm(
+  deaths_per_100_pop ~ cases + new_cases + cases_per_100_pop, data=train_data)
+summary(model_ndc)
+```
+
+```{r viz base death percent model, include=FALSE}
+with_ndc_prediction = copy(train_data)
+with_ndc_prediction$prediction = predict(model_ndc, new=train_data)
+with_ndc_prediction %>%
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=deaths_per_100_pop), color="blue") +
+  geom_point(aes(y=prediction), color="red") +
+  labs(title="Model Predictions", x="Date", y="Deaths per 100 Pop")
+```
+
+
+
+```{r fit full death percent model, include=FALSE}
+model_ndfull = lm(
+  deaths_per_100_pop ~ cases_per_100_pop*country_region, data=train_data)
+summary(model_ndfull)
+```
+
+```{r viz full death percent model, include=FALSE}
+with_ndfull_prediction = copy(train_data)
+with_ndfull_prediction$prediction = predict(model_ndfull, new=train_data)
+with_ndfull_prediction %>%
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=deaths_per_100_pop), color="blue") +
+  geom_point(aes(y=prediction), color="red") +
+  labs(title="Model Predictions", x="Date", y="Deaths per 100 Pop")
+```
+
+Finally, we are going to model new cases and deaths. Since we know that there are definite differences in the data distribution based on time, we are only going to use the data approximately after the Omicron peak at the start of 2022.
+
+
+```{r fit and viz cases model}
+train_data_latest = train_data %>% filter(week > "2022-04-01")
+model_tcfull = lm(
+  new_cases ~ country_region + deaths_per_100_cases + as.numeric(week), data=train_data_latest)
+summary(model_tcfull)
+
+with_tcfull_prediction = copy(train_data_latest)
+with_tcfull_prediction$prediction = predict(model_tcfull, new=train_data_latest)
+with_tcfull_prediction %>%
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=new_cases), color="blue") +
+  geom_point(aes(y=prediction), color="red", size=1.2) +
+  labs(title="Model Predictions", x="Date", y="Cases")
+```
+
+
+```{r fit viz deaths model}
+model_tdfull = lm(
+  new_deaths ~ country_region + deaths_per_100_cases + as.numeric(week), data=train_data_latest)
+summary(model_tdfull)
+
+with_tdfull_prediction = copy(train_data_latest)
+with_tdfull_prediction$prediction = predict(model_tdfull, new=train_data_latest)
+with_tdfull_prediction %>%
+  ggplot(aes(x=week)) +
+  geom_point(aes(y=new_deaths), color="blue") +
+  geom_point(aes(y=prediction), color="red", size=1.2) +
+  labs(title="Model Predictions", x="Date", y="Deaths")
+```
+We can see that the models have trouble fitting the data due to how variable it is. In both cases, there is a slight decrease with time, but that decrease is low. However, it's important to remember that there is a period trend, which is not capture by linear models and it might be incorrect to draw any conclusions from this.
+
+# Conclusions
+
+While this dataset allows to perform quite a few analyses and the report only barely touches a few directions, it is important to remember that the data might not be as representative as one hopes. First of all, it focuses only on cases and deaths. This completely ignores any possible long term complications that COVID causes. Also, the definitions themselves are difficult to determine and differ between countries. For example, should a death a month after a negative test count if there are no other apparent reasons and how can this be tracked? Secondly, the testing methodology and behaviour are changing. Right now, I would expect fewer people to be doing tests and the tests themselves are worse due to the amount of new variants. This can cause undercounting for both the cases and deaths. For the report itself, the main limitation is that it only focused on 4 selected countries. While the countries are from different regions, they are still not representative of other countries due to how many possible variations they are.
+
+Nevertheless, I think it's pretty clear from the data that at the moment where it stops, there is not enough information to determine if it's going to continue to decrease, stay at approximately the same level without peaks and valleys or it's going to continue the same periodic trend. Taking into the account new emerging variants, I would say it's important to keep tracking COVID19 extensively and to be aware of the possible risks.
